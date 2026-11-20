@@ -22,6 +22,7 @@ from typing import TypeVar
 from quizai.backends.base import (
     ANSWER_SYSTEM,
     DETECT_SYSTEM,
+    SCREEN_SYSTEM,
     AnswerResult,
     Backend,
     BackendError,
@@ -41,18 +42,6 @@ T = TypeVar("T")
 # Retry config for transient errors. 3 attempts, 1s/2s/4s waits.
 _MAX_ATTEMPTS = 3
 _INITIAL_BACKOFF_S = 1.0
-
-# One-call screen reader: extract every question and answer it in a single
-# request (image + OCR text), so a whole capture costs one API call.
-_SCREEN_SYSTEM = (
-    "You are given a screenshot of a quiz/exam (image) plus OCR text extracted "
-    "from it. Extract EVERY question verbatim, including its answer choices, and "
-    "answer each. Use the OCR text for exact wording; use the IMAGE to read any "
-    "chart, graph, figure, table, or diagram needed to answer. For multiple choice "
-    "give the letter AND the option text (e.g. 'D. May'); for numeric give the value. "
-    "Add a 1-2 sentence explanation per question.\n"
-    'Reply ONLY with JSON: {"questions":[{"question":str,"answer":str,"explanation":str}]}'
-)
 
 
 class GeminiBackend(Backend):
@@ -130,19 +119,25 @@ class GeminiBackend(Backend):
         from google.genai import types
 
         mime, data = encode_image_for_upload(png_bytes)
+        hint = (ocr_text or "").strip()
+        user_text = (
+            "OCR TEXT (rough hint — the image is authoritative; ignore it where "
+            "it conflicts with the image):\n" + hint
+            if hint
+            else "Read the screenshot directly and answer every question."
+        )
 
         def _call():
             return self._client.models.generate_content(
                 model=self._model,
                 contents=[
                     types.Part.from_bytes(data=data, mime_type=mime),
-                    "OCR TEXT (exact wording; use the image for charts/figures/tables):\n"
-                    + (ocr_text or ""),
+                    user_text,
                 ],
                 config=types.GenerateContentConfig(
-                    system_instruction=_SCREEN_SYSTEM,
-                    max_output_tokens=2048,
-                    temperature=0.2,
+                    system_instruction=SCREEN_SYSTEM,
+                    max_output_tokens=4096,
+                    temperature=0.0,
                     response_mime_type="application/json",
                 ),
             )

@@ -108,7 +108,7 @@ class ApiWorker(QObject):
         self._provider: str = ""
         self._ollama_host: str = ""
         self._ocr_reader = None  # lazy quizai.ocr.OCRReader
-        self._ocr_answers: dict[str, str] = {}  # precomputed answers for current capture
+        self._precomputed_answers: dict[str, str] = {}  # answers for current capture
         self._ocr_enabled: bool = False
         self._ocr_text_model: str = "gemma3:4b"
         self._ocr_conf_floor: float = 0.55
@@ -189,7 +189,7 @@ class ApiWorker(QObject):
     def _handle_screen(self, job: _ScreenJob) -> None:
         assert self._backend is not None
         self.detection_started.emit("screen")
-        self._ocr_answers = {}
+        self._precomputed_answers = {}
         t0 = time.time()
         # Per-capture telemetry — one CAPTURE log line is emitted in `finally`
         # so dogfooding produces a tunable dataset (route mix, conf, latency).
@@ -198,11 +198,11 @@ class ApiWorker(QObject):
             "conf": None,
             "chars": None,
             "questions": 0,
-            "reason": "ocr fast path off (disabled or non-ollama)",
+            "reason": "ocr fast path disabled",
             "cache": False,
         }
         try:
-            if self._try_ocr_fast_path(job):
+            if self._try_fast_path(job):
                 return
             cached = self._cached_detection(job.png)
             det = cached
@@ -228,18 +228,23 @@ class ApiWorker(QObject):
         finally:
             self._log_capture(time.time() - t0)
 
-    # ------------------------------------------------------- OCR-first fast path
-    def _try_ocr_fast_path(self, job: _ScreenJob) -> bool:
-        """Read the screen with OCR, then answer. Returns True if it fully handled
-        the capture; False to fall back to the legacy vision detect+answer path.
+    # ------------------------------------------------------------- fast paths
+    def _try_fast_path(self, job: _ScreenJob) -> bool:
+        """Fast paths for a screen capture.
 
-        - Ollama: local text model answers text questions; vision model handles
-          visual ones (keeps it free + offline).
-        - Cloud (Gemini/etc.): one combined call (OCR text + image) extracts and
-          answers everything — 1 request per capture instead of detect + N answers.
+        - Cloud (Gemini / OpenAI-compatible): send the IMAGE DIRECTLY in one
+          call. No OCR — OCR is the main source of math/diagram corruption, and
+          the vision model reads the screen more reliably on its own.
+        - Ollama: keep the local OCR fast path (text model answers text
+          questions; vision handles visual ones) because it avoids the ~18 s
+          local vision encoder.
+        - Anthropic / others without `answer_screen`: return False and let the
+          legacy detect+answer path handle the capture.
 
-        Updates self._route_info for telemetry (the CAPTURE line is logged by the
-        caller)."""
+        Returns True if the capture was fully handled.
+        """
+        if self._provider not in ("ollama", "local"):
+            return self._answer_screen_direct(job)
         if not self._ocr_enabled:
             return False
         info = self._route_info
@@ -247,7 +252,7 @@ class ApiWorker(QObject):
             key = hashlib.sha256(job.png).hexdigest()
             cached_items = self._cached_ocr(key)
             if cached_items is not None:
-                self._emit_ocr_items(cached_items)
+                self._emit_items(cached_items)
                 info.update(
                     route="cache",
                     questions=len(cached_items),
@@ -267,30 +272,35 @@ class ApiWorker(QObject):
             if ocr.char_count < 3:
                 info["reason"] = "no usable text from OCR"
                 return False
-
-            if self._provider == "ollama":
-                return self._ocr_answer_ollama(job, ocr, key, info)
-            return self._ocr_answer_cloud(job, ocr, key, info)
+            return self._ocr_answer_ollama(job, ocr, key, info)
         except Exception as exc:
             log.warning("OCR fast path failed (%s); falling back to vision", exc)
             info["reason"] = f"ocr error: {exc}"
             return False
 
-    def _ocr_answer_cloud(self, job: _ScreenJob, ocr, key: str, info: dict) -> bool:
-        """One combined cloud call: OCR text + image → extract + answer all."""
+    def _answer_screen_direct(self, job: _ScreenJob) -> bool:
+        """Send the screenshot straight to the cloud model — no OCR."""
+        info = self._route_info
+        answer_screen = getattr(self._backend, "answer_screen", None)
+        if answer_screen is None:
+            info["reason"] = "single-call not supported; using detect+answer"
+            return False
         try:
             t = time.time()
-            items = self._backend.answer_screen(ocr.text, job.png)
+            items = answer_screen("", job.png)
             info["t_cloud"] = time.time() - t
         except NotImplementedError:
             info["reason"] = "single-call not supported; using detect+answer"
             return False
         if not items:
-            info["reason"] = "no questions extracted (cloud)"
+            info["reason"] = "no questions from direct vision; using detect+answer"
             return False
-        self._store_ocr(key, items)
-        self._emit_ocr_items(items)
-        info.update(route="cloud", questions=len(items), reason="answered via cloud (1 call)")
+        self._emit_items(items)
+        info.update(
+            route="vision",
+            questions=len(items),
+            reason="direct image → model (1 call, no OCR)",
+        )
         return True
 
     def _ocr_answer_ollama(self, job: _ScreenJob, ocr, key: str, info: dict) -> bool:
@@ -326,7 +336,7 @@ class ApiWorker(QObject):
             info.update(questions=len(items), reason="no answers from text or vision")
             return False
         self._store_ocr(key, items)
-        self._emit_ocr_items(items)
+        self._emit_items(items)
         n_vis = len(vis_idx)
         if force_vision:
             reason = "answered via vision (image)"
@@ -343,8 +353,8 @@ class ApiWorker(QObject):
 
     _NEEDS_IMAGE = "(needs image — re-capture just this question)"
 
-    def _emit_ocr_items(self, items: list) -> None:
-        """Feed OCR-derived Q&A through the existing questions/answer signals.
+    def _emit_items(self, items: list) -> None:
+        """Feed extracted Q&A through the existing questions/answer signals.
 
         Text-answerable questions show their answer; questions flagged as needing
         visual context show a placeholder (per-question vision escalation is Phase 3)."""
@@ -352,7 +362,7 @@ class ApiWorker(QObject):
         def ans(i) -> str:
             return i.answer or self._NEEDS_IMAGE
 
-        self._ocr_answers = {
+        self._precomputed_answers = {
             i.question: (ans(i), getattr(i, "explanation", "") or "") for i in items
         }
         self.questions_extracted.emit([i.question for i in items])
@@ -395,8 +405,8 @@ class ApiWorker(QObject):
 
     # ------------------------------------------------- single-question answer
     def _handle_answer_index(self, job: _AnswerJob) -> None:
-        # OCR fast path already computed this answer — reuse it, don't re-call.
-        precomputed = self._ocr_answers.get(job.question)
+        # The fast path already computed this answer — reuse it, don't re-call.
+        precomputed = self._precomputed_answers.get(job.question)
         if precomputed is not None:
             answer, explanation = precomputed
             self.answer_ready.emit("screen", job.question, answer, explanation, job.index)

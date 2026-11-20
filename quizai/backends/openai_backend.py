@@ -29,6 +29,7 @@ from typing import TypeVar
 from quizai.backends.base import (
     ANSWER_SYSTEM,
     DETECT_SYSTEM,
+    SCREEN_SYSTEM,
     AnswerResult,
     Backend,
     BackendError,
@@ -52,18 +53,6 @@ _TIMEOUT_S = 180.0  # local vision servers can take a while on first load
 # rejects roughly one upload in five, so a retry usually succeeds.
 _MAX_ATTEMPTS = 4
 _INITIAL_BACKOFF_S = 1.0
-
-# One-call screen reader: extract every question and answer it in a single
-# request (image + OCR text), so a whole capture costs one API call.
-_SCREEN_SYSTEM = (
-    "You are given a screenshot of a quiz/exam (image) plus OCR text extracted "
-    "from it. Extract EVERY question verbatim, including its answer choices, and "
-    "answer each. Use the OCR text for exact wording; use the IMAGE to read any "
-    "chart, graph, figure, table, or diagram needed to answer. For multiple choice "
-    "give the letter AND the option text (e.g. 'D. May'); for numeric give the value. "
-    "Add a 1-2 sentence explanation per question.\n"
-    'Reply ONLY with JSON: {"questions":[{"question":str,"answer":str,"explanation":str}]}'
-)
 
 
 class OpenAIBackend(Backend):
@@ -125,26 +114,30 @@ class OpenAIBackend(Backend):
     def answer_screen(self, ocr_text: str, png_bytes: bytes) -> list[QAItem]:
         """Extract and answer every question on screen in a single request.
 
-        Mirrors the Gemini backend: the OCR text gives exact wording, the image
-        covers charts, figures and tables.
+        The image is authoritative. OCR text is passed only as a rough hint and
+        may be omitted entirely for visual/math captures (see app.py routing).
         """
         mime, data = encode_image_for_upload(png_bytes)
         b64 = base64.standard_b64encode(data).decode("ascii")
+        hint = (ocr_text or "").strip()
+        user_text = (
+            "OCR TEXT (rough hint — the image is authoritative; ignore it where "
+            "it conflicts with the image):\n" + hint
+            if hint
+            else "Read the screenshot directly and answer every question."
+        )
         body = {
             "model": self._model,
-            "temperature": 0.2,
+            "temperature": 0.0,
             "max_tokens": 4096,
             "messages": [
-                {"role": "system", "content": _SCREEN_SYSTEM},
+                {"role": "system", "content": SCREEN_SYSTEM},
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                "OCR TEXT (exact wording; use the image for "
-                                "charts/figures/tables):\n" + (ocr_text or "")
-                            ),
+                            "text": user_text,
                         },
                         {
                             "type": "image_url",

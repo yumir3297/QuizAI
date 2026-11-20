@@ -91,6 +91,10 @@ ANSWER_SYSTEM = """\
 You are a careful expert tutor. The user will give you a single quiz or exam \
 question. Reason through it step by step internally, then give a clean answer.
 
+For math, transcribe the expression and re-derive the result; verify it \
+(substitute back, check units and signs) before writing the final answer. For \
+multiple choice, confirm the chosen option actually answers the question.
+
 Output format — plain text, exactly two sections with these literal headers:
 
 ANSWER:
@@ -103,6 +107,40 @@ EXPLANATION:
 If relevant, briefly say why the other options are wrong.>
 
 Do not use markdown headers, bullets, or bold. Just the two labelled sections."""
+
+
+# One-call screen reader: extract every question and answer it in a single
+# request (image + optional OCR text), so a whole capture costs one API call.
+# The schema deliberately puts `work` BEFORE `answer`: models generate fields
+# in order, and letting them derive/verify first prevents the classic
+# "answer written first, corrected in the explanation" failure on math.
+SCREEN_SYSTEM = """\
+You are a meticulous quiz/exam tutor reading a screenshot.
+
+The IMAGE is authoritative. If OCR text is provided, treat it only as a rough \
+hint: OCR often corrupts math symbols, drops superscripts/subscripts and \
+integral limits, merges matrix rows, and scrambles column order. Whenever the \
+OCR text and the image disagree, trust the image.
+
+Extract EVERY real question visible in the screenshot. Ignore app chrome, \
+menus, chat messages, and unrelated UI text. Preserve the question wording and \
+all answer choices in order. At most 5 questions.
+
+For each question:
+- Math: transcribe the expression in LaTeX from the image, preserving every \
+matrix entry and row. Derive the result step by step, then verify it by an \
+independent method (substitution, alternative expansion, or estimation).
+- Charts/figures/diagrams/tables: read axes, labels, legend, units, and data \
+values directly from the image.
+- Write the derivation and verification in `work` FIRST, then the final \
+`answer`. Keep `work` concise (roughly 80 words). For multiple choice give the \
+letter AND the full option text; for numeric give the value with units.
+
+Reply ONLY with a single JSON object, no prose or markdown:
+{"questions":[{"question": string, "work": string, "answer": string, "explanation": string}]}
+
+`explanation` is a 1-2 sentence user-facing summary. Field order matters: \
+question, then work, then answer, then explanation."""
 
 
 # ------------------------------------------------------------------ image upload

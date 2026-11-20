@@ -39,6 +39,43 @@ _VISUAL_NOUN = re.compile(
     re.IGNORECASE,
 )
 
+# OCR often drops spaces ("Accordingtothechart"), so word-boundary regexes miss
+# the visual keywords. Matching against a space-stripped copy catches those.
+# A false positive only costs the OCR hint — the image remains authoritative.
+_COMPACT_VISUAL = (
+    "chart",
+    "graph",
+    "diagram",
+    "figure",
+    "circuit",
+    "flowchart",
+    "histogram",
+    "scatter",
+    "venn",
+    "geometry",
+)
+
+# Chinese questions reference visuals without spaces; \b never matches here.
+_CJK_VISUAL = (
+    "如图",
+    "下图",
+    "上图",
+    "下表",
+    "上表",
+    "图中",
+    "图表",
+    "图形",
+    "图像",
+    "曲线",
+    "示意",
+    "电路",
+    "表格",
+    "统计图",
+    "柱状图",
+    "折线图",
+    "饼图",
+)
+
 # Rendered-math glyphs OCR commonly *corrupts*: superscripts/subscripts (e.g. 2^3
 # misread as 23), roots, integrals, sums, vulgar fractions. Plain operators and
 # symbols (times, divide, minus, plus, comparison and degree signs, pi, theta) are
@@ -64,16 +101,29 @@ def decide_route(
         return RouteDecision(True, "no usable text from OCR")
     if mean_confidence < conf_floor:
         return RouteDecision(True, f"low OCR confidence ({mean_confidence:.2f})")
-    if _REFERENTIAL.search(text) or _VISUAL_NOUN.search(text):
+    if _references_visual(text):
         return RouteDecision(True, "references a figure/graph/diagram")
     if _math_is_heavy(text):
         return RouteDecision(True, "rendered math glyphs (OCR-unreliable)")
     return RouteDecision(False, "plain text — OCR/text path")
 
 
-def _math_is_heavy(text: str) -> bool:
-    """True if rendered-math glyphs appear enough that OCR likely mangled them.
+def _references_visual(text: str) -> bool:
+    """True if the text points at something only visible in the image."""
+    if _REFERENTIAL.search(text) or _VISUAL_NOUN.search(text):
+        return True
+    compact = re.sub(r"\s+", "", text).lower()
+    if any(word in compact for word in _COMPACT_VISUAL):
+        return True
+    return any(word in text for word in _CJK_VISUAL)
 
-    A single stray degree sign shouldn't trip it; multiple math glyphs do.
+
+def _math_is_heavy(text: str) -> bool:
+    """True if rendered-math glyphs appear that OCR likely mangled.
+
+    Any superscript/subscript/root/integral/fraction glyph is enough: OCR turns
+    ``x²`` into ``x2`` at high confidence, and a single corrupted symbol can
+    change the answer. Degree signs are not in the list, so "90°" stays on the
+    text path.
     """
-    return len(_MATH_GLYPH_RE.findall(text)) >= 2
+    return bool(_MATH_GLYPH_RE.search(text))

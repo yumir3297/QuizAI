@@ -287,3 +287,57 @@ def test_answer_screen_returns_nothing_for_a_non_json_reply(monkeypatch, mock_se
         base_url=f"http://127.0.0.1:{srv.server_address[1]}",
     )
     assert backend.answer_screen("ocr", _png_bytes()) == []
+
+
+# --------------------------------------------------- screen prompt / OCR hint
+def test_answer_screen_is_image_only_when_ocr_is_empty(monkeypatch, mock_server):
+    """Visual/math captures pass no OCR text; the image must be authoritative."""
+    import quizai.backends.openai_backend as ob
+
+    monkeypatch.setattr(ob.time, "sleep", lambda _s: None)
+
+    content = json.dumps(
+        {"questions": [{"question": "Q", "work": "W", "answer": "A", "explanation": "E"}]}
+    )
+    srv, handler = mock_server([], content)
+
+    from quizai.backends import create_backend
+
+    backend = create_backend(
+        provider="openai",
+        api_key="k",
+        model="m",
+        base_url=f"http://127.0.0.1:{srv.server_address[1]}",
+    )
+    items = backend.answer_screen("", _png_bytes(size=(200, 120)))
+
+    body = json.loads(handler.calls[0])
+    assert body["temperature"] == 0.0
+    text = body["messages"][1]["content"][0]["text"]
+    assert "OCR TEXT" not in text
+    assert "Read the screenshot directly" in text
+    assert items[0].answer == "A"
+
+
+def test_answer_screen_marks_ocr_as_a_rough_hint(monkeypatch, mock_server):
+    import quizai.backends.openai_backend as ob
+
+    monkeypatch.setattr(ob.time, "sleep", lambda _s: None)
+
+    content = json.dumps({"questions": [{"question": "Q", "answer": "A"}]})
+    srv, handler = mock_server([], content)
+
+    from quizai.backends import create_backend
+
+    backend = create_backend(
+        provider="openai",
+        api_key="k",
+        model="m",
+        base_url=f"http://127.0.0.1:{srv.server_address[1]}",
+    )
+    backend.answer_screen("x² = 4", _png_bytes(size=(200, 120)))
+
+    body = json.loads(handler.calls[0])
+    text = body["messages"][1]["content"][0]["text"]
+    assert "rough hint" in text
+    assert "x² = 4" in text

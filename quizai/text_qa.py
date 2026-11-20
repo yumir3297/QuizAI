@@ -26,6 +26,9 @@ _TIMEOUT_S = 120.0
 _SYSTEM = (
     "You are given raw OCR text from a quiz/exam screenshot. Extract EVERY question "
     "verbatim, including its answer choices, and answer each.\n"
+    "OCR often corrupts math symbols (x²→x2, ½→12) and merges matrix rows. If a "
+    "question's math is ambiguous or incomplete, set requires_visual_context=true "
+    "instead of guessing.\n"
     "Set requires_visual_context=true (and answer=null) ONLY when answering truly needs "
     "a picture whose information is NOT in the text — e.g. 'which graph/figure shows…', a "
     "diagram, a photo, or a chart you cannot read from the text. If a table's rows/values "
